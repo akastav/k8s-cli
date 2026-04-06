@@ -1,6 +1,6 @@
 module k8s-cli
 
-go 1.24.5
+go 1.24
 
 require (
 	github.com/olekukonko/tablewriter v1.1.4

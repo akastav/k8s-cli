@@ -982,7 +982,7 @@ func printUnusedServices(svcs []ServiceUsage) {
 func writeGarbageReport(filename string, secrets []SecretUsage, cms []ConfigMapUsage, pvcs []PVCUsage, svcs []ServiceUsage) error {
 	file, err := os.Create(filename)
 	if err != nil {
-		return err
+		return fmt.Errorf("ошибка создания файла: %w", err)
 	}
 	defer file.Close()
 

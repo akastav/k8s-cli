@@ -37,7 +37,6 @@ var maintenanceStartCmd = &cobra.Command{
 			return
 		}
 
-		// Получаем все узлы в зоне
 		labelSelector := fmt.Sprintf("topology.kubernetes.io/zone=%s", maintenanceZone)
 		nodes, err := clientset.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{
 			LabelSelector: labelSelector,
@@ -55,7 +54,6 @@ var maintenanceStartCmd = &cobra.Command{
 		fmt.Printf("\nНайдено узлов в зоне %s: %d\n", maintenanceZone, len(nodes.Items))
 		fmt.Println(strings.Repeat("-", 80))
 
-		// Вывод списка узлов
 		table := tablewriter.NewWriter(os.Stdout)
 		table.Header([]string{"NAME", "STATUS", "UNSCHEDULABLE", "PODS"})
 
@@ -70,7 +68,6 @@ var maintenanceStartCmd = &cobra.Command{
 		}
 		table.Render()
 
-		// Подтверждение
 		if !maintenanceForce {
 			fmt.Printf("\nВы уверены, что хотите включить режим обслуживания для зоны %s? (yes/no): ", maintenanceZone)
 			var confirm string
@@ -82,39 +79,35 @@ var maintenanceStartCmd = &cobra.Command{
 			}
 		}
 
-		// Обработка каждого узла
 		var successCount int
 		var failedCount int
 
 		for _, node := range nodes.Items {
 			fmt.Printf("\n[%s] Обработка узла...\n", node.Name)
 
-			// Помечаем узел как unschedulable
 			if !node.Spec.Unschedulable {
 				node.Spec.Unschedulable = true
 				_, err := clientset.CoreV1().Nodes().Update(context.TODO(), &node, metav1.UpdateOptions{})
 				if err != nil {
-					fmt.Printf("  ✗ Ошибка пометки узла как unschedulable: %v\n", err)
+					fmt.Printf("  Ошибка пометки узла как unschedulable: %v\n", err)
 					failedCount++
 					continue
 				}
-				fmt.Printf("  ✓ Узел помечен как unschedulable\n")
+				fmt.Printf("  Узел помечен как unschedulable\n")
 			} else {
-				fmt.Printf("  ✓ Узел уже unschedulable\n")
+				fmt.Printf("  Узел уже unschedulable\n")
 			}
 
-			// Вытеснение подов
 			evicted, failed := evictPodsFromNode(clientset, node.Name, maintenanceIgnoreDaemonSets, maintenanceDeleteEmptyDir, maintenanceTimeout)
 			successCount += evicted
 			failedCount += failed
 
-			// Очистка подов в статусе Terminating
 			cleaned := cleanTerminatingPods(clientset, node.Name, maintenanceTimeout)
-			fmt.Printf("  ✓ Очищено подов в статусе Terminating: %d\n", cleaned)
+			fmt.Printf("  Очищено подов в статусе Terminating: %d\n", cleaned)
 		}
 
 		fmt.Println(strings.Repeat("-", 80))
-		fmt.Printf("✓ Режим обслуживания включён для зоны %s\n", maintenanceZone)
+		fmt.Printf("Режим обслуживания включен для зоны %s\n", maintenanceZone)
 		fmt.Printf("  Вытеснено подов: %d\n", successCount)
 		if failedCount > 0 {
 			fmt.Printf("  Ошибок: %d\n", failedCount)
@@ -122,7 +115,6 @@ var maintenanceStartCmd = &cobra.Command{
 	},
 }
 
-// Получение количества подов на узле
 func getNodePodCount(clientset *kubernetes.Clientset, nodeName string) int {
 	pods, err := clientset.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{
 		FieldSelector: fmt.Sprintf("spec.nodeName=%s", nodeName),
@@ -133,7 +125,6 @@ func getNodePodCount(clientset *kubernetes.Clientset, nodeName string) int {
 	return len(pods.Items)
 }
 
-// Вытеснение подов с узла
 func evictPodsFromNode(clientset *kubernetes.Clientset, nodeName string, ignoreDaemonSets, deleteEmptyDir bool, timeout int) (int, int) {
 	pods, err := clientset.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{
 		FieldSelector: fmt.Sprintf("spec.nodeName=%s", nodeName),
@@ -147,17 +138,14 @@ func evictPodsFromNode(clientset *kubernetes.Clientset, nodeName string, ignoreD
 	var failedCount int
 
 	for _, pod := range pods.Items {
-		// Пропускаем статические поды
 		if _, ok := pod.Annotations["kubernetes.io/config.source"]; ok {
 			continue
 		}
 
-		// Пропускаем поды без владельца
 		if len(pod.OwnerReferences) == 0 {
 			continue
 		}
 
-		// Проверяем DaemonSet
 		isDaemonSet := false
 		for _, owner := range pod.OwnerReferences {
 			if owner.Kind == "DaemonSet" {
@@ -170,7 +158,6 @@ func evictPodsFromNode(clientset *kubernetes.Clientset, nodeName string, ignoreD
 			continue
 		}
 
-		// Проверяем emptyDir
 		hasEmptyDir := false
 		for _, volume := range pod.Spec.Volumes {
 			if volume.EmptyDir != nil {
@@ -183,13 +170,12 @@ func evictPodsFromNode(clientset *kubernetes.Clientset, nodeName string, ignoreD
 			continue
 		}
 
-		// Удаляем под
 		err := clientset.CoreV1().Pods(pod.Namespace).Delete(context.TODO(), pod.Name, metav1.DeleteOptions{})
 		if err != nil {
-			fmt.Printf("    ✗ Ошибка удаления пода %s/%s: %v\n", pod.Namespace, pod.Name, err)
+			fmt.Printf("    Ошибка удаления пода %s/%s: %v\n", pod.Namespace, pod.Name, err)
 			failedCount++
 		} else {
-			fmt.Printf("    ✓ Вытеснен под %s/%s\n", pod.Namespace, pod.Name)
+			fmt.Printf("    Вытеснен под %s/%s\n", pod.Namespace, pod.Name)
 			evictedCount++
 		}
 	}
@@ -197,7 +183,8 @@ func evictPodsFromNode(clientset *kubernetes.Clientset, nodeName string, ignoreD
 	return evictedCount, failedCount
 }
 
-// Очистка подов в статусе Terminating
+// cleanTerminatingPods ожидает завершения подов в статусе Terminating
+// Если под не завершается в течение timeout, выполняется force delete
 func cleanTerminatingPods(clientset *kubernetes.Clientset, nodeName string, timeout int) int {
 	pods, err := clientset.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{
 		FieldSelector: fmt.Sprintf("spec.nodeName=%s", nodeName),
@@ -209,37 +196,46 @@ func cleanTerminatingPods(clientset *kubernetes.Clientset, nodeName string, time
 	var cleanedCount int
 
 	for _, pod := range pods.Items {
-		if pod.DeletionTimestamp != nil {
-			// Под в статусе Terminating
-			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
+		if pod.DeletionTimestamp == nil {
+			continue
+		}
 
-			for {
-				select {
-				case <-ctx.Done():
-					// Принудительное удаление
-					err := clientset.CoreV1().Pods(pod.Namespace).Delete(context.TODO(), pod.Name, metav1.DeleteOptions{
-						GracePeriodSeconds: int64ptr(0),
-					})
-					if err == nil {
-						cleanedCount++
-						fmt.Printf("    ✓ Принудительно удалён под %s/%s\n", pod.Namespace, pod.Name)
-					}
-					cancel()
+		fmt.Printf("    Ожидание завершения пода %s/%s...\n", pod.Namespace, pod.Name)
+
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
+		defer cancel()
+
+		// Используем ticker для периодической проверки состояния
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				// Таймаут - force delete
+				gracePeriod := int64(0)
+				err := clientset.CoreV1().Pods(pod.Namespace).Delete(context.TODO(), pod.Name, metav1.DeleteOptions{
+					GracePeriodSeconds: &gracePeriod,
+				})
+				if err == nil {
+					fmt.Printf("    Принудительно удален под %s/%s\n", pod.Namespace, pod.Name)
+					cleanedCount++
+				}
+				return cleanedCount
+			case <-ticker.C:
+				// Проверяем, удалился ли под
+				p, err := clientset.CoreV1().Pods(pod.Namespace).Get(context.TODO(), pod.Name, metav1.GetOptions{})
+				if err != nil {
+					// Под успешно удалён
+					fmt.Printf("    Под %s/%s завершился\n", pod.Namespace, pod.Name)
+					cleanedCount++
 					return cleanedCount
-				default:
-					p, err := clientset.CoreV1().Pods(pod.Namespace).Get(context.TODO(), pod.Name, metav1.GetOptions{})
-					if err != nil {
-						// Под удалён
-						cleanedCount++
-						cancel()
-						return cleanedCount
-					}
-					if p.DeletionTimestamp == nil {
-						// Под больше не в статусе Terminating
-						cancel()
-						return cleanedCount
-					}
-					time.Sleep(2 * time.Second)
+				}
+				if p.DeletionTimestamp == nil {
+					// Под больше не в статусе Terminating
+					fmt.Printf("    Под %s/%s завершился\n", pod.Namespace, pod.Name)
+					cleanedCount++
+					return cleanedCount
 				}
 			}
 		}

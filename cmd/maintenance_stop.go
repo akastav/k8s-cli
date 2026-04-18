@@ -18,11 +18,10 @@ var stopMaintenanceForce bool
 var maintenanceStopCmd = &cobra.Command{
 	Use:   "stop",
 	Short: "Выключить режим обслуживания",
-	Long:  `Выключает режим обслуживания для всех узлов в указанной зоне. Узлы возвращаются в нормальный режим (uncordon).`,
+	Long:  `Выключает режим обслуживания для всех узлов в указанной зоне.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		if stopMaintenanceZone == "" {
 			fmt.Println("Ошибка: необходимо указать зону (--zone)")
-			fmt.Println("Пример: ./k8s-cli maintenance stop --zone=us-east-1a")
 			return
 		}
 
@@ -32,7 +31,6 @@ var maintenanceStopCmd = &cobra.Command{
 			return
 		}
 
-		// Получаем все узлы в зоне
 		labelSelector := fmt.Sprintf("topology.kubernetes.io/zone=%s", stopMaintenanceZone)
 		nodes, err := clientset.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{
 			LabelSelector: labelSelector,
@@ -50,7 +48,6 @@ var maintenanceStopCmd = &cobra.Command{
 		fmt.Printf("\nНайдено узлов в зоне %s: %d\n", stopMaintenanceZone, len(nodes.Items))
 		fmt.Println(strings.Repeat("-", 80))
 
-		// Вывод списка узлов
 		table := tablewriter.NewWriter(os.Stdout)
 		table.Header([]string{"NAME", "STATUS", "UNSCHEDULABLE", "PODS"})
 
@@ -65,19 +62,16 @@ var maintenanceStopCmd = &cobra.Command{
 		}
 		table.Render()
 
-		// Подтверждение
 		if !stopMaintenanceForce {
 			fmt.Printf("\nВы уверены, что хотите выключить режим обслуживания для зоны %s? (yes/no): ", stopMaintenanceZone)
 			var confirm string
 			fmt.Scanln(&confirm)
-
 			if strings.ToLower(confirm) != "yes" {
 				fmt.Println("Операция отменена")
 				return
 			}
 		}
 
-		// Возвращаем узлы в нормальный режим
 		var successCount int
 		var failedCount int
 		var alreadyReadyCount int
@@ -86,7 +80,7 @@ var maintenanceStopCmd = &cobra.Command{
 			fmt.Printf("\n[%s] Возврат узла в нормальный режим...\n", node.Name)
 
 			if !node.Spec.Unschedulable {
-				fmt.Printf("  ✓ Узел уже в нормальном режиме\n")
+				fmt.Printf("  Узел уже в нормальном режиме\n")
 				alreadyReadyCount++
 				continue
 			}
@@ -94,17 +88,17 @@ var maintenanceStopCmd = &cobra.Command{
 			node.Spec.Unschedulable = false
 			_, err := clientset.CoreV1().Nodes().Update(context.TODO(), &node, metav1.UpdateOptions{})
 			if err != nil {
-				fmt.Printf("  ✗ Ошибка возврата узла в нормальный режим: %v\n", err)
+				fmt.Printf("  Ошибка возврата узла: %v\n", err)
 				failedCount++
 				continue
 			}
 
-			fmt.Printf("  ✓ Узел возвращён в нормальный режим (schedulable)\n")
+			fmt.Printf("  Узел возвращен в нормальный режим (schedulable)\n")
 			successCount++
 		}
 
 		fmt.Println(strings.Repeat("-", 80))
-		fmt.Printf("✓ Режим обслуживания выключен для зоны %s\n", stopMaintenanceZone)
+		fmt.Printf("Режим обслуживания выключен для зоны %s\n", stopMaintenanceZone)
 		fmt.Printf("  Возвращено узлов: %d\n", successCount)
 		fmt.Printf("  Уже в нормальном режиме: %d\n", alreadyReadyCount)
 		if failedCount > 0 {

@@ -19,23 +19,6 @@ var drainDeleteEmptyDir bool
 var drainTimeout int
 var drainZone string
 
-// Получение зоны узла
-func getDrainNodeZone(node v1.Node) string {
-	zoneLabels := []string{
-		"topology.kubernetes.io/zone",
-		"failure-domain.beta.kubernetes.io/zone",
-		"zone",
-	}
-
-	for _, label := range zoneLabels {
-		if value, ok := node.Labels[label]; ok {
-			return value
-		}
-	}
-
-	return "<unknown>"
-}
-
 var drainCmd = &cobra.Command{
 	Use:   "drain [node-name]",
 	Short: "Освободить узел для обслуживания",
@@ -49,7 +32,6 @@ var drainCmd = &cobra.Command{
 
 		var nodesToDrain []v1.Node
 
-		// Если указана зона, drain все узлы в зоне
 		if drainZone != "" {
 			nodes, err := clientset.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
 			if err != nil {
@@ -58,7 +40,7 @@ var drainCmd = &cobra.Command{
 			}
 
 			for _, node := range nodes.Items {
-				nodeZone := getDrainNodeZone(node)
+				nodeZone := k8s.GetNodeZone(node)
 				if nodeZone == drainZone {
 					nodesToDrain = append(nodesToDrain, node)
 				}
@@ -71,11 +53,8 @@ var drainCmd = &cobra.Command{
 
 			fmt.Printf("Найдено узлов в зоне %s: %d\n", drainZone, len(nodesToDrain))
 		} else {
-			// Drain конкретного узла
 			if len(args) < 1 {
 				fmt.Println("Ошибка: необходимо указать имя узла или использовать флаг --zone")
-				fmt.Println("Пример: ./k8s-cli drain worker-node-1")
-				fmt.Println("Пример: ./k8s-cli drain -z us-east-1")
 				return
 			}
 
@@ -89,12 +68,21 @@ var drainCmd = &cobra.Command{
 			nodesToDrain = []v1.Node{*node}
 		}
 
-		// Обработка каждого узла
 		for _, targetNode := range nodesToDrain {
 			nodeName := targetNode.Name
-			fmt.Printf("\n%s Обработка узла: %s (зона: %s)%s\n", strings.Repeat("=", 60), nodeName, getDrainNodeZone(targetNode), strings.Repeat("=", 60))
+			fmt.Printf("\n%s Обработка узла: %s (зона: %s)%s\n", strings.Repeat("=", 60), nodeName, k8s.GetNodeZone(targetNode), strings.Repeat("=", 60))
 
-			// Получаем все поды на узле
+			// СНАЧАЛА помечаем узел как unschedulable, чтобы предотвратить race condition
+			nodeForUpdate := targetNode
+			nodeForUpdate.Spec.Unschedulable = true
+			_, err := clientset.CoreV1().Nodes().Update(context.TODO(), &nodeForUpdate, metav1.UpdateOptions{})
+			if err != nil {
+				fmt.Printf("Ошибка пометки узла %s как unschedulable: %v\n", nodeName, err)
+				continue
+			}
+			fmt.Printf("Узел %s помечен как unschedulable\n", nodeName)
+
+			// Теперь получаем поды на узле
 			pods, err := clientset.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{
 				FieldSelector: fmt.Sprintf("spec.nodeName=%s", nodeName),
 			})
@@ -103,31 +91,26 @@ var drainCmd = &cobra.Command{
 				continue
 			}
 
-			// Фильтруем поды для удаления
 			var podsToEvict []v1.Pod
 			var daemonSetPods []v1.Pod
 			var emptyDirPods []v1.Pod
 			var terminatingPods []v1.Pod
 
 			for _, pod := range pods.Items {
-				// Собираем поды в статусе Terminating для очистки
 				if pod.DeletionTimestamp != nil {
 					terminatingPods = append(terminatingPods, pod)
 					continue
 				}
 
-				// Пропускаем статические поды
 				if _, ok := pod.Annotations["kubernetes.io/config.source"]; ok {
 					continue
 				}
 
-				// Пропускаем поды без ownerReference
 				if len(pod.OwnerReferences) == 0 {
-					fmt.Printf("⚠ Пропущен под %s/%s (нет владельца)\n", pod.Namespace, pod.Name)
+					fmt.Printf("Пропущен под %s/%s (нет владельца)\n", pod.Namespace, pod.Name)
 					continue
 				}
 
-				// Проверяем DaemonSet
 				isDaemonSet := false
 				for _, owner := range pod.OwnerReferences {
 					if owner.Kind == "DaemonSet" {
@@ -138,13 +121,11 @@ var drainCmd = &cobra.Command{
 
 				if isDaemonSet {
 					if drainIgnoreDaemonSets {
-						fmt.Printf("⚠ Пропущен DaemonSet под %s/%s\n", pod.Namespace, pod.Name)
 						continue
 					}
 					daemonSetPods = append(daemonSetPods, pod)
 				}
 
-				// Проверяем emptyDir volumes
 				hasEmptyDir := false
 				for _, volume := range pod.Spec.Volumes {
 					if volume.EmptyDir != nil {
@@ -156,8 +137,6 @@ var drainCmd = &cobra.Command{
 				if hasEmptyDir {
 					if drainDeleteEmptyDir {
 						emptyDirPods = append(emptyDirPods, pod)
-					} else {
-						fmt.Printf("⚠ Под %s/%s имеет emptyDir volume\n", pod.Namespace, pod.Name)
 					}
 					continue
 				}
@@ -165,16 +144,13 @@ var drainCmd = &cobra.Command{
 				podsToEvict = append(podsToEvict, pod)
 			}
 
-			// Предупреждения
 			if len(daemonSetPods) > 0 && !drainIgnoreDaemonSets {
-				fmt.Printf("\n⚠ Найдено %d подов DaemonSet. Используйте --ignore-daemonsets для пропуска.\n", len(daemonSetPods))
+				fmt.Printf("\nНайдено %d подов DaemonSet. Используйте --ignore-daemonsets.\n", len(daemonSetPods))
 			}
-
 			if len(emptyDirPods) > 0 && !drainDeleteEmptyDir {
-				fmt.Printf("⚠ Найдено %d подов с emptyDir. Используйте --delete-emptydir-data для удаления.\n", len(emptyDirPods))
+				fmt.Printf("Найдено %d подов с emptyDir. Используйте --delete-emptydir-data.\n", len(emptyDirPods))
 			}
 
-			// Вывод списка подов
 			totalPods := len(podsToEvict) + len(emptyDirPods) + len(terminatingPods)
 			if totalPods > 0 {
 				fmt.Println("\nПоды для обработки:")
@@ -194,69 +170,53 @@ var drainCmd = &cobra.Command{
 				table.Render()
 			}
 
-			// Подтверждение
 			if !drainForce {
-				fmt.Printf("\nВы уверены, что хотите освободить узел %s? (yes/no): ", nodeName)
+				fmt.Printf("\nВы уверены? (yes/no): ")
 				var confirm string
 				fmt.Scanln(&confirm)
-
 				if strings.ToLower(confirm) != "yes" {
 					fmt.Println("Операция отменена")
 					continue
 				}
 			}
 
-			// Помечаем узел как unschedulable
-			targetNode.Spec.Unschedulable = true
-			_, err = clientset.CoreV1().Nodes().Update(context.TODO(), &targetNode, metav1.UpdateOptions{})
-			if err != nil {
-				fmt.Printf("Ошибка пометки узла %s как unschedulable: %v\n", nodeName, err)
-				continue
-			}
-			fmt.Printf("✓ Узел %s помечен как unschedulable\n", nodeName)
-
-			// Вытеснение подов
 			var evictedCount int
 			var failedCount int
 
 			allPods := append(podsToEvict, emptyDirPods...)
 
 			for _, pod := range allPods {
-				fmt.Printf("Вытеснение пода %s/%s... ", pod.Namespace, pod.Name)
-
+				fmt.Printf("Удаление пода %s/%s... ", pod.Namespace, pod.Name)
 				err := clientset.CoreV1().Pods(pod.Namespace).Delete(context.TODO(), pod.Name, metav1.DeleteOptions{})
 				if err != nil {
-					fmt.Printf("✗ Ошибка: %v\n", err)
+					fmt.Printf("Ошибка: %v\n", err)
 					failedCount++
 				} else {
-					fmt.Println("✓")
+					fmt.Println("OK")
 					evictedCount++
 				}
 			}
 
-			// Очистка подов в статусе Terminating
 			for _, pod := range terminatingPods {
 				fmt.Printf("Очистка Terminating пода %s/%s... ", pod.Namespace, pod.Name)
-
-				// Force delete
 				gracePeriod := int64(0)
 				err := clientset.CoreV1().Pods(pod.Namespace).Delete(context.TODO(), pod.Name, metav1.DeleteOptions{
 					GracePeriodSeconds: &gracePeriod,
 				})
 				if err != nil {
-					fmt.Printf("✗ Ошибка: %v\n", err)
+					fmt.Printf("Ошибка: %v\n", err)
 					failedCount++
 				} else {
-					fmt.Println("✓")
+					fmt.Println("OK")
 					evictedCount++
 				}
 			}
 
 			fmt.Println(strings.Repeat("-", 60))
-			fmt.Printf("Узел %s: Вытеснено подов: %d, Ошибок: %d\n", nodeName, evictedCount, failedCount)
+			fmt.Printf("Узел %s: Вытеснено: %d, Ошибок: %d\n", nodeName, evictedCount, failedCount)
 		}
 
-		fmt.Printf("\n✓ Завершена обработка %d узла(ов)\n", len(nodesToDrain))
+		fmt.Printf("\nЗавершена обработка %d узла(ов)\n", len(nodesToDrain))
 	},
 }
 

@@ -14,23 +14,6 @@ import (
 var cordonForce bool
 var cordonZone string
 
-// Получение зоны узла
-func getCordonNodeZone(node v1.Node) string {
-	zoneLabels := []string{
-		"topology.kubernetes.io/zone",
-		"failure-domain.beta.kubernetes.io/zone",
-		"zone",
-	}
-
-	for _, label := range zoneLabels {
-		if value, ok := node.Labels[label]; ok {
-			return value
-		}
-	}
-
-	return "<unknown>"
-}
-
 var cordonCmd = &cobra.Command{
 	Use:   "cordon [node-name]",
 	Short: "Пометить узел как недоступный для планирования",
@@ -53,7 +36,7 @@ var cordonCmd = &cobra.Command{
 			}
 
 			for _, node := range nodes.Items {
-				if getCordonNodeZone(node) == cordonZone {
+				if k8s.GetNodeZone(node) == cordonZone {
 					nodesToCordon = append(nodesToCordon, node)
 				}
 			}
@@ -85,7 +68,7 @@ var cordonCmd = &cobra.Command{
 		if !cordonForce {
 			fmt.Printf("Будет помечено узлов: %d\n", len(nodesToCordon))
 			for _, node := range nodesToCordon {
-				fmt.Printf("  - %s (zone: %s)\n", node.Name, getCordonNodeZone(node))
+				fmt.Printf("  - %s (zone: %s)\n", node.Name, k8s.GetNodeZone(node))
 			}
 			fmt.Printf("\nВы уверены, что хотите пометить эти узлы как unschedulable? (yes/no): ")
 			var confirm string
